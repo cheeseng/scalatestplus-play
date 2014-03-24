@@ -214,6 +214,42 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
     }
   }
 
+  /**
+   * Construct a new instance of this <code>Suite</code>.
+   *
+   * <p>
+   * This trait's implementation of <code>run</code> invokes this method to create
+   * a new instance of this <code>Suite</code> for each discovered <code>WebDriver</code>
+   * to execute tests. This trait's implementation
+   * of this method uses reflection to call <code>this.getClass.newInstance</code>. This
+   * approach will succeed only if this <code>Suite</code>'s class has a public, no-arg
+   * constructor. In most cases this is likely to be true, because to be instantiated
+   * by ScalaTest's <code>Runner</code> a <code>Suite</code> needs a public, no-arg
+   * constructor. However, this will not be true of any <code>Suite</code> defined as
+   * an inner class of another class or trait, because every constructor of an inner
+   * class type takes a reference to the enclosing instance. In such cases, and in
+   * cases where a <code>Suite</code> class is explicitly defined without a public,
+   * no-arg constructor, you will need to override this method to construct a new
+   * instance of the <code>Suite</code> in some other way.
+   * </p>
+   *
+   * <p>
+   * Here's an example of how you could override <code>newInstance</code> to construct
+   * a new instance of an inner class:
+   * </p>
+   *
+   * <pre class="stHighlight">
+   * import org.scalatest.Suite
+   *
+   * class Outer {
+   *   class InnerSuite extends Suite with AllBrowsersPerSuite {
+   *     def testOne() {}
+   *     def testTwo() {}
+   *     override def newInstance = new InnerSuite
+   *   }
+   * }
+   * </pre>
+   */
   def newInstance: Suite with AllBrowsersPerSuite = this.getClass.newInstance.asInstanceOf[Suite with AllBrowsersPerSuite]
 }
 

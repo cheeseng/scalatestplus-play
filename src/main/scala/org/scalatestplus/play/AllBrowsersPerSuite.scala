@@ -52,7 +52,7 @@ import BrowserDriver.NoDriver
  * and run with them.
  *
  */
-trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually with IntegrationPatience { this: Suite =>
+trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually with IntegrationPatience { this: WordSpec =>
 
   /**
    * An implicit instance of <code>FakeApplication</code>.
@@ -65,12 +65,15 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
    */
   val port: Int = Helpers.testServerPort
 
-  private var privateWebDriver: WebDriver = _
+  //private var privateWebDriver: WebDriver = _
+
+  @volatile private var privateWebDriverFun: () => WebDriver = _
+  @volatile private var privateWebDriverName: String = _
 
   /**
    * Implicit method to get the <code>WebDriver</code> for the current test.
    */
-  implicit def webDriver: WebDriver = synchronized { privateWebDriver }
+  implicit lazy val webDriver: WebDriver = synchronized { privateWebDriverFun() }
 
   /**
    * Method to provide <code>FirefoxProfile</code> for creating <code>FirefoxDriver</code>, you can override this method to
@@ -96,6 +99,22 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
     }
   }
 
+  private val webDriverSetThreadLocal = new ThreadLocal[Set[(String, () => WebDriver)]]
+
+  abstract override def suiteName: String = {
+    if (privateWebDriverName == null)
+      super.suiteName
+    else
+      super.suiteName + " (" + privateWebDriverName + ")"
+  }
+
+  abstract override def suiteId: String = {
+    if (privateWebDriverName == null)
+      super.suiteName
+    else
+      super.suiteId + "-" + privateWebDriverName
+  }
+
   /**
    * Overriden to start <code>TestServer</code> before running the tests, pass a <code>FakeApplication</code> into the tests in
    * <code>args.configMap</code> via "app" key, <code>TestServer</code>'s port number via "port", <code>WebDriver</code>
@@ -109,7 +128,7 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
    * @param args the <code>Args</code> for this run
    * @return a <code>Status</code> object that indicates when all tests and nested suites started by this method have completed, and whether or not a failure occurred.
    */
-  abstract override def run(testName: Option[String], args: Args): Status = {
+  /*abstract override def run(testName: Option[String], args: Args): Status = {
     val testServer = TestServer(port, app)
     val availableWebDrivers: Set[(String, () => WebDriver)] =
       Set(
@@ -165,6 +184,7 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
       new CompositeStatus(
         (filterWebDrivers.map { case (name, driverFun) =>
           synchronized {
+            privateWebDriverName = name
             privateWebDriver = driverFun()
           }
           val newConfigMap = args.configMap + ("app" -> app) + ("port" -> port) + ("webDriver" -> webDriver) + ("webDriverName" -> name)
@@ -183,6 +203,96 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
     } finally {
       testServer.stop()
     }
+  }*/
+
+  private def getFilteredWebDriverSet(testName: Option[String], args: Args): Set[(String, () => WebDriver)] = {
+    val availableWebDrivers: Set[(String, () => WebDriver)] =
+      Set(
+        ("Chrome", () => WebDriverFactory.createChromeDriver),
+        ("Firefox", () => WebDriverFactory.createFirefoxDriver(firefoxProfile)),
+        ("Internet Explorer", () => WebDriverFactory.createInternetExplorerDriver),
+        ("Safari", () => WebDriverFactory.createSafariDriver),
+        ("HtmlUnit", () => WebDriverFactory.createHtmlUnitDriver)
+      )
+
+    args.configMap.getOptional[String]("browsers") match {
+      case Some("") =>
+        args.reporter(AlertProvided(
+          args.tracker.nextOrdinal(),
+          Resources("emptyBrowsers"),
+          Some(NameInfo(this.suiteName, this.suiteId, Some(this.getClass.getName), testName))
+        ))
+        availableWebDrivers
+
+      case Some(browsers) =>
+        val invalidChars = browsers.filter(c => !"CFISH".contains(c.toString.toUpperCase))
+        if (!invalidChars.isEmpty) {
+          val (resourceName, charsString) =
+            if (invalidChars.length > 1) {
+              val initString = invalidChars.init.map(c => "'" + c + "'").mkString(Resources("commaSpace"))
+              ("invalidBrowsersChars", Resources("and", initString, "'" + invalidChars.last  + "'"))
+            }
+            else
+              ("invalidBrowsersChar", "'" + invalidChars.head + "'")
+          args.reporter(AlertProvided(
+            args.tracker.nextOrdinal(),
+            Resources(resourceName, charsString),
+            Some(NameInfo(this.suiteName, this.suiteId, Some(this.getClass.getName), testName))
+          ))
+        }
+        val filteredDrivers =
+          availableWebDrivers.filter { case (name, webDriverFun) =>
+            browsers.toUpperCase.contains(name.charAt(0))
+          }
+
+        // If no valid option, just fallback to default that uses all available browsers
+        if (filteredDrivers.isEmpty)
+          availableWebDrivers
+        else
+          filteredDrivers
+
+      case None => availableWebDrivers
+    }
   }
+
+  abstract override def run(testName: Option[String], args: Args): Status = {
+    if (privateWebDriverName != null) { // it is the child suite
+      val newConfigMap = args.configMap + ("app" -> app) + ("port" -> port) + ("webDriver" -> webDriver) + ("webDriverName" -> privateWebDriverName)
+      val newArgs = args.copy(configMap = newConfigMap)
+      val testServer = TestServer(port, app)
+      try {
+        testServer.start()
+        super.run(testName, newArgs)
+      }
+      finally {
+        testServer.stop()
+        webDriver match {
+          case NoDriver(_) => // do nothing for NoDriver
+          case theDriver => theDriver.close()
+        }
+      }
+    }
+    else {
+      val filteredWebDrivers = getFilteredWebDriverSet(testName, args)
+      webDriverSetThreadLocal.set(filteredWebDrivers)
+      runNestedSuites(args)
+    }
+  }
+
+  abstract override def nestedSuites: collection.immutable.IndexedSeq[Suite] = {
+    if (privateWebDriverName != null) // it is the child suite
+      Vector.empty
+    else {
+      val filteredWebDrivers = webDriverSetThreadLocal.get
+      (filteredWebDrivers.map { case (name, driverFun) =>
+        val instance = newInstance
+        instance.privateWebDriverName = name
+        instance.privateWebDriverFun = driverFun
+        instance
+      }).toVector
+    }
+  }
+
+  def newInstance: Suite with AllBrowsersPerSuite = this.getClass.newInstance.asInstanceOf[Suite with AllBrowsersPerSuite]
 }
 

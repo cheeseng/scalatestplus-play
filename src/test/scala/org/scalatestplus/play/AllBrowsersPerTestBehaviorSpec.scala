@@ -29,6 +29,8 @@ class AllBrowsersPerTestBehaviorSpec extends WordSpec {
     class TestSpec extends UnitSpec with AllBrowsersPerTest {
       "test 1" in {}
       "test 2" in {}
+
+      override def newInstance: Suite with AllBrowsersPerTest = new TestSpec
     }
 
     val chrome = try { val d = new ChromeDriver(); d.close(); 1 } catch { case ex: Throwable => 0 }

@@ -78,13 +78,27 @@ trait AllBrowsersPerTest extends SuiteMixin with WebBrowser with Eventually with
       ("HtmlUnit", () => WebDriverFactory.createHtmlUnitDriver)
     )
 
-  private var privateDriverMeta: (String, () => WebDriver) = _
   private var privateWebDriver: WebDriver = _
+
+  @volatile private var privateWebDriverFun: () => WebDriver = _
+  @volatile private var privateWebDriverName: String = _
 
   /**
    * Implicit method to get the <code>WebDriver</code> for the current test.
    */
   implicit def webDriver: WebDriver = synchronized { privateWebDriver }
+
+  /**
+   * Override to include the <code>WebDriver</code> in suite name.
+   *
+   * @return <code>super.suiteName</code> + " (" + webDriverName + ")"
+   */
+  abstract override def suiteName: String = {
+    if (privateWebDriverName == null)
+      super.suiteName
+    else
+      super.suiteName + " (" + privateWebDriverName + ")"
+  }
 
   /**
    * Override <code>withFixture</code> to create new instance of <code>WebDriver</code> before
@@ -97,7 +111,7 @@ trait AllBrowsersPerTest extends SuiteMixin with WebBrowser with Eventually with
    * @return the <code>Outcome</code> of the test execution
    */
   abstract override def withFixture(test: NoArgTest): Outcome =
-    privateWebDriver match {
+    webDriver match {
       case NoDriver(ex) =>
         val name = test.configMap("webDriverName")
         val message = Resources("cantCreateDriver", name)
@@ -120,27 +134,70 @@ trait AllBrowsersPerTest extends SuiteMixin with WebBrowser with Eventually with
    * @return a <code>Status</code> object that indicates when the test started by this method has completed, and whether or not it failed .
    */
   abstract override def runTest(testName: String, args: Args): Status = {
-    val (name, driverFun) = privateDriverMeta
     synchronized {
       privateApp = new FakeApplication()
-      privateWebDriver =
-        try {
-          driverFun()
-        }
-        catch {
-          case ex: Throwable => NoDriver(Some(ex))
-        }
+      privateWebDriver = privateWebDriverFun()
     }
     try {
-      val newConfigMap = args.configMap + ("app" -> privateApp) + ("port" -> port) + ("webDriver" -> webDriver) + ("webDriverName" -> name)
+      val newConfigMap = args.configMap + ("app" -> privateApp) + ("port" -> port) + ("webDriver" -> webDriver)
       val newArgs = args.copy(configMap = newConfigMap)
       super.runTest(testName, newArgs)
     }
     finally {
-      privateWebDriver match {
+      webDriver match {
         case NoDriver(_) => // do nothing
-        case _ => privateWebDriver.close()
+        case theDriver => theDriver.close()
       }
+    }
+  }
+
+  private def getFilteredWebDriverSet(testName: Option[String], args: Args): Set[(String, () => WebDriver)] = {
+    val availableWebDrivers: Set[(String, () => WebDriver)] =
+      Set(
+        ("Chrome", () => WebDriverFactory.createChromeDriver),
+        ("Firefox", () => WebDriverFactory.createFirefoxDriver(firefoxProfile)),
+        ("Internet Explorer", () => WebDriverFactory.createInternetExplorerDriver),
+        ("Safari", () => WebDriverFactory.createSafariDriver),
+        ("HtmlUnit", () => WebDriverFactory.createHtmlUnitDriver)
+      )
+
+    args.configMap.getOptional[String]("browsers") match {
+      case Some("") =>
+        args.reporter(AlertProvided(
+          args.tracker.nextOrdinal(),
+          Resources("emptyBrowsers"),
+          Some(NameInfo(this.suiteName, this.suiteId, Some(this.getClass.getName), testName))
+        ))
+        availableWebDrivers
+
+      case Some(browsers) =>
+        val invalidChars = browsers.filter(c => !"CFISH".contains(c.toString.toUpperCase))
+        if (!invalidChars.isEmpty) {
+          val (resourceName, charsString) =
+            if (invalidChars.length > 1) {
+              val initString = invalidChars.init.map(c => "'" + c + "'").mkString(Resources("commaSpace"))
+              ("invalidBrowsersChars", Resources("and", initString, "'" + invalidChars.last  + "'"))
+            }
+            else
+              ("invalidBrowsersChar", "'" + invalidChars.head + "'")
+          args.reporter(AlertProvided(
+            args.tracker.nextOrdinal(),
+            Resources(resourceName, charsString),
+            Some(NameInfo(this.suiteName, this.suiteId, Some(this.getClass.getName), testName))
+          ))
+        }
+        val filteredDrivers =
+          availableWebDrivers.filter { case (name, webDriverFun) =>
+            browsers.toUpperCase.contains(name.charAt(0))
+          }
+
+        // If no valid option, just fallback to default that uses all available browsers
+        if (filteredDrivers.isEmpty)
+          availableWebDrivers
+        else
+          filteredDrivers
+
+      case None => availableWebDrivers
     }
   }
 
@@ -153,53 +210,59 @@ trait AllBrowsersPerTest extends SuiteMixin with WebBrowser with Eventually with
    * @return a <code>Status</code> object that indicates when the test started by this method has completed, and whether or not it failed .
    */
   abstract override def run(testName: Option[String], args: Args): Status = {
-    val filterWebDrivers =
-      args.configMap.getOptional[String]("browsers") match {
-        case Some("") =>
-          args.reporter(AlertProvided(
-            args.tracker.nextOrdinal(),
-            Resources("emptyBrowsers"),
-            Some(NameInfo(this.suiteName, this.suiteId, Some(this.getClass.getName), testName))
-          ))
-          webDrivers
 
-        case Some(browsers) =>
-          val invalidChars = browsers.filter(c => !"CFISH".contains(c.toString.toUpperCase))
-          if (!invalidChars.isEmpty) {
-            val (resourceName, charsString) =
-              if (invalidChars.length > 1) {
-                val initString = invalidChars.init.map(c => "'" + c + "'").mkString(Resources("commaSpace"))
-                ("invalidBrowsersChars", Resources("and", initString, "'" + invalidChars.last  + "'"))
-              }
-              else
-                ("invalidBrowsersChar", "'" + invalidChars.head + "'")
-            args.reporter(AlertProvided(
-              args.tracker.nextOrdinal(),
-              Resources(resourceName, charsString),
-              Some(NameInfo(this.suiteName, this.suiteId, Some(this.getClass.getName), testName))
-            ))
-          }
-          val filteredDrivers =
-            webDrivers.filter { case (name, webDriverFun) =>
-              browsers.toUpperCase.contains(name.charAt(0))
-            }
-
-          // If no valid option, just fallback to default that uses all available browsers
-          if (filteredDrivers.isEmpty)
-            webDrivers
-          else
-            filteredDrivers
-
-        case None => webDrivers
-      }
-
-    new CompositeStatus(
-      filterWebDrivers.map { case (name, driverFun) =>
-        synchronized {
-          privateDriverMeta = (name, driverFun)
+    if (privateWebDriverName != null) { // it is the child suite
+    val newConfigMap = args.configMap + ("webDriverName" -> privateWebDriverName)
+      val newArgs = args.copy(configMap = newConfigMap)
+      super.run(testName, newArgs)
+    }
+    else {
+      val filteredWebDrivers = getFilteredWebDriverSet(testName, args)
+      new CompositeStatus(
+        filteredWebDrivers.map { case (name, driverFun) =>
+          val instance = newInstance
+          instance.privateWebDriverName = name
+          instance.privateWebDriverFun = driverFun
+          instance.run(testName, args)
         }
-        super.run(testName, args)
-      }
-    )
+      )
+    }
   }
+
+  /**
+   * Construct a new instance of this <code>Suite</code>.
+   *
+   * <p>
+   * This trait's implementation of <code>run</code> invokes this method to create
+   * a new instance of this <code>Suite</code> for each discovered <code>WebDriver</code>
+   * to execute tests. This trait's implementation of this method uses reflection to call
+   * <code>this.getClass.newInstance</code>. This approach will succeed only if this
+   * <code>Suite</code>'s class has a public, no-arg constructor. In most cases this is
+   * likely to be true, because to be instantiated by ScalaTest's <code>Runner</code> a
+   * <code>Suite</code> needs a public, no-arg constructor. However, this will not be true
+   * of any <code>Suite</code> defined as an inner class of another class or trait, because
+   * every constructor of an inner class type takes a reference to the enclosing instance.
+   * In such cases, and in cases where a <code>Suite</code> class is explicitly defined without
+   * a public, no-arg constructor, you will need to override this method to construct a new
+   * instance of the <code>Suite</code> in some other way.
+   * </p>
+   *
+   * <p>
+   * Here's an example of how you could override <code>newInstance</code> to construct
+   * a new instance of an inner class:
+   * </p>
+   *
+   * <pre class="stHighlight">
+   * import org.scalatest.Suite
+   *
+   * class Outer {
+   *   class InnerSuite extends Suite with AllBrowsersPerTest {
+   *     def testOne() {}
+   *     def testTwo() {}
+   *     override def newInstance = new InnerSuite
+   *   }
+   * }
+   * </pre>
+   */
+  def newInstance: Suite with AllBrowsersPerTest = this.getClass.newInstance.asInstanceOf[Suite with AllBrowsersPerTest]
 }

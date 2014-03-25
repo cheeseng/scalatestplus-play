@@ -182,7 +182,7 @@ trait AllBrowsersPerSuite extends SuiteMixin with WebBrowser with Eventually wit
   abstract override def run(testName: Option[String], args: Args): Status = {
 
     if (privateWebDriverName != null) { // it is the child suite
-    val newConfigMap = args.configMap + ("app" -> app) + ("port" -> port) + ("webDriver" -> webDriver) + ("webDriverName" -> privateWebDriverName)
+      val newConfigMap = args.configMap + ("app" -> app) + ("port" -> port) + ("webDriver" -> webDriver) + ("webDriverName" -> privateWebDriverName)
       val newArgs = args.copy(configMap = newConfigMap)
       try {
         super.run(testName, newArgs)
